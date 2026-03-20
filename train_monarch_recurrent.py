@@ -638,6 +638,24 @@ def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
 # MONARCH ATTENTION & MLP
 # -----------------------------
 
+import inspect as _inspect
+_SDPA_HAS_GQA = "enable_gqa" in _inspect.signature(F.scaled_dot_product_attention).parameters
+
+def _sdpa_gqa(q: Tensor, k: Tensor, v: Tensor, num_heads: int, num_kv_heads: int) -> Tensor:
+    """Scaled dot-product attention with GQA, compatible with old and new PyTorch."""
+    if _SDPA_HAS_GQA:
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, is_causal=True,
+            enable_gqa=(num_kv_heads != num_heads),
+        )
+    if num_kv_heads != num_heads:
+        bsz, _, seqlen, head_dim = q.shape
+        reps = num_heads // num_kv_heads
+        k = k[:, :, None, :, :].expand(bsz, num_kv_heads, reps, seqlen, head_dim).reshape(bsz, num_heads, seqlen, head_dim)
+        v = v[:, :, None, :, :].expand(bsz, num_kv_heads, reps, seqlen, head_dim).reshape(bsz, num_heads, seqlen, head_dim)
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(
         self,
@@ -680,16 +698,7 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        # Manual GQA expansion for older PyTorch without enable_gqa
-        if self.num_kv_heads != self.num_heads:
-            reps = self.num_heads // self.num_kv_heads
-            k = k[:, :, None, :, :].expand(bsz, self.num_kv_heads, reps, seqlen, self.head_dim).reshape(bsz, self.num_heads, seqlen, self.head_dim)
-            v = v[:, :, None, :, :].expand(bsz, self.num_kv_heads, reps, seqlen, self.head_dim).reshape(bsz, self.num_heads, seqlen, self.head_dim)
-        y = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=None,
-            is_causal=True,
-        )
+        y = _sdpa_gqa(q, k, v, self.num_heads, self.num_kv_heads)
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y, loop_idx)
 
