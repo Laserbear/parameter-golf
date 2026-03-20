@@ -27,13 +27,17 @@ import sentencepiece as spm
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from kernels import get_kernel
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-# Flash Attention 3
-fa3_module = get_kernel("kernels-community/flash-attn3", version=1)
-flash_attn_func = fa3_module.flash_attn_func
+# Flash Attention 3 (Modal) or fallback to PyTorch SDPA
+try:
+    from kernels import get_kernel
+    fa3_module = get_kernel("kernels-community/flash-attn3", version=1)
+    flash_attn_func = fa3_module.flash_attn_func
+    _USE_FA3 = True
+except ImportError:
+    _USE_FA3 = False
 
 # -----------------------------
 # HYPERPARAMETERS
@@ -589,7 +593,14 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        y = flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal=True).transpose(1, 2)
+        if _USE_FA3:
+            y = flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal=True).transpose(1, 2)
+        else:
+            if self.num_kv_heads != self.num_heads:
+                reps = self.num_heads // self.num_kv_heads
+                k = k[:, :, None, :, :].expand(bsz, self.num_kv_heads, reps, seqlen, self.head_dim).reshape(bsz, self.num_heads, seqlen, self.head_dim)
+                v = v[:, :, None, :, :].expand(bsz, self.num_kv_heads, reps, seqlen, self.head_dim).reshape(bsz, self.num_heads, seqlen, self.head_dim)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
 
