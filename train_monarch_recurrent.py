@@ -638,8 +638,7 @@ def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
 # MONARCH ATTENTION & MLP
 # -----------------------------
 
-import inspect as _inspect
-_SDPA_HAS_GQA = "enable_gqa" in _inspect.signature(F.scaled_dot_product_attention).parameters
+_SDPA_HAS_GQA = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2]) >= (2, 5)
 
 def _sdpa_gqa(q: Tensor, k: Tensor, v: Tensor, num_heads: int, num_kv_heads: int) -> Tensor:
     """Scaled dot-product attention with GQA, compatible with old and new PyTorch."""
