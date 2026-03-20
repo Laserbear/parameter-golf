@@ -369,7 +369,10 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             stats["int8_payload_bytes"] += tensor_nbytes(kept)
             continue
         stats["num_float_tensors"] += 1
-        q, s = quantize_float_tensor(t, bits=6)
+        # MLP down-projection carries all FFN expressivity when using Hadamard FFN —
+        # use int8 (127 levels) instead of int6 (31 levels) to preserve quality.
+        use_bits = 8 if "mlp.proj.weight" in name else 6
+        q, s = quantize_float_tensor(t, bits=use_bits)
         if s.ndim > 0:
             qmeta[name] = {"scheme": "per_row", "axis": 0}
         quantized[name] = q
